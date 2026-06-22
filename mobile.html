@@ -9,6 +9,7 @@
     <meta name="theme-color" content="#667eea">
     <title>💰 My Lendings management</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script type="module" src="https://unpkg.com/idb?module"></script>
     <style>
         * {
             margin: 0;
@@ -43,7 +44,7 @@
 
 <!-- original page content continues here -->
 
-<!-- Backup / Export controls injected by Copilot -->
+<!-- Export / Import controls (no repo backup) -->
 <style>
   #backup-floating {
     position: fixed;
@@ -80,16 +81,6 @@
     display: none;
     z-index: 10000;
   }
-  /* simple modal */
-  #backup-modal {
-    position: fixed;
-    left: 0; top: 0; right:0; bottom:0;
-    display: none; align-items: center; justify-content: center;
-    background: rgba(0,0,0,0.5); z-index: 11000;
-  }
-  #backup-modal.active { display:flex; }
-  #backup-modal .modal-box { background:white; padding:16px; border-radius:8px; width:90%; max-width:480px; }
-  #pat-input { width:100%; padding:8px; border:1px solid #ddd; border-radius:6px; }
 </style>
 
 <div id="backup-floating" aria-hidden="true">
@@ -97,34 +88,101 @@
   <button id="export-csv">Export CSV</button>
   <button id="export-json">Export JSON</button>
   <button id="import-json">Import JSON</button>
-  <button id="backup-config">Backup Settings</button>
   <input id="import-file" type="file" accept="application/json" style="display:none" />
 </div>
 <div id="backup-msg" role="status"></div>
 
-<div id="backup-modal" aria-hidden="true">
-  <div class="modal-box">
-    <h3>Backup Settings</h3>
-    <p style="font-size:0.9em;color:#444;margin-bottom:8px;">Paste a short-lived GitHub Personal Access Token (repo scope) to enable automatic repo backups. The token will be stored only in your browser's localStorage. Revoke it when finished.</p>
-    <input id="pat-input" placeholder="ghp_your_token_here" autocomplete="off" />
-    <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end;">
-      <button id="pat-save" style="background:#28a745;color:#fff;padding:8px 12px;border-radius:6px;border:none;">Save</button>
-      <button id="pat-clear" style="background:#dc3545;color:#fff;padding:8px 12px;border-radius:6px;border:none;">Clear</button>
-    </div>
-  </div>
-</div>
-
 <script>
-(function(){
-  const OWNER = 'rakshithanaveen';
-  const REPO = 'My-loan';
-  const TARGET_BRANCH = 'main';
-  const BACKUP_DIR = 'backups';
+(async function(){
+  // IndexedDB-based storage for loans (migrations from localStorage)
+  const DB_NAME = 'myloan-db';
+  const DB_VERSION = 1;
+  const STORE_NAME = 'loans';
 
+  // Helpers
+  function normalizeLoan(l) {
+    const borrowerName = l.borrowerName ?? l.name ?? l.borrower ?? '';
+    const amountRaw = l.amount ?? l.loanAmount ?? l.principal ?? '';
+    const interestRaw = l.interestRate ?? l.interest ?? l.rate ?? '';
+    const loanDateRaw = l.loanDate ?? l.date ?? l.startDate ?? '';
+    const phoneNumber = l.phoneNumber ?? l.phone ?? l.contact ?? '';
+
+    const amount = (typeof amountRaw === 'number') ? amountRaw : (Number(String(amountRaw).replace(/[^0-9.-]+/g, '')) || 0);
+    const interestRate = (typeof interestRaw === 'number') ? interestRaw : (Number(String(interestRaw).replace(/[^0-9.-]+/g, '')) || 0);
+    const loanDate = loanDateRaw ? new Date(loanDateRaw).toISOString() : new Date().toISOString();
+
+    return { borrowerName, amount, interestRate, loanDate, phoneNumber };
+  }
+
+  // idb is available as module from unpkg; use window.indexedDB fallback if idb not loaded
+  const idb = window.idb;
+
+  async function openDB() {
+    if (idb && idb.openDB) {
+      return idb.openDB(DB_NAME, DB_VERSION, {
+        upgrade(db) {
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            store.createIndex('loanDate', 'loanDate');
+            store.createIndex('borrowerName', 'borrowerName');
+          }
+        }
+      });
+    }
+    // Minimal fallback using native IndexedDB
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          store.createIndex('loanDate', 'loanDate');
+          store.createIndex('borrowerName', 'borrowerName');
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function addLoan(db, loan) {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    await store.add(loan);
+    await tx.done;
+  }
+
+  async function putLoan(db, loan) {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    await store.put(loan);
+    await tx.done;
+  }
+
+  async function getAllLoans(db) {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    if (idb && idb.getAll) {
+      return await store.getAll();
+    }
+    // fallback
+    return new Promise((resolve, reject) => {
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function makeId() {
+    if (crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'id-' + Date.now() + '-' + Math.floor(Math.random()*100000);
+  }
+
+  // localStorage heuristics (same as previous)
   const PREFERRED_KEY = 'loans';
   const KNOWN_KEYS = ['loans','myLoans','loanData','loan_list','loanDataList','loanDetails'];
 
-  function findLoansKeyAndValue() {
+  function findLoansInLocalStorage() {
     for (const k of KNOWN_KEYS) {
       try {
         const raw = localStorage.getItem(k);
@@ -149,48 +207,52 @@
     return { key: PREFERRED_KEY, value: [] };
   }
 
-  function readLoans() {
-    const discovered = findLoansKeyAndValue();
-    return { key: discovered.key, loans: discovered.value || [] };
-  }
-
-  function saveLoans(key, loans) {
+  async function migrateToIndexedDB(db) {
     try {
-      localStorage.setItem(key, JSON.stringify(loans));
-      window.loans = loans;
-      return true;
-    } catch(e) {
-      console.error('saveLoans error', e);
-      return false;
+      const migratedFlag = localStorage.getItem('loans_migrated_v1');
+      if (migratedFlag) return; // already migrated
+      const found = findLoansInLocalStorage();
+      if (!found || !found.value || found.value.length === 0) {
+        localStorage.setItem('loans_migrated_v1', '1');
+        return;
+      }
+      const existing = await getAllLoans(db);
+      if (existing && existing.length > 0) {
+        // DB already has data; do not duplicate, but mark migrated
+        localStorage.setItem('loans_migrated_v1', '1');
+        return;
+      }
+      for (let i = 0; i < found.value.length; i++) {
+        const raw = found.value[i];
+        const norm = normalizeLoan(raw);
+        const loan = {
+          id: makeId(),
+          borrowerName: norm.borrowerName,
+          amount: norm.amount,
+          interestRate: norm.interestRate,
+          loanDate: norm.loanDate,
+          phoneNumber: norm.phoneNumber,
+          status: raw.status ?? 'active',
+          createdAt: raw.createdAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        await putLoan(db, loan);
+      }
+      localStorage.setItem('loans_migrated_v1', '1');
+      console.log('Migrated loans to IndexedDB');
+    } catch (e) {
+      console.error('Migration failed', e);
     }
   }
 
-  function normalizeLoan(l) {
-    return {
-      borrowerName: l.borrowerName ?? l.name ?? l.borrower ?? '',
-      amount: l.amount ?? l.loanAmount ?? l.principal ?? '',
-      interestRate: l.interestRate ?? l.interest ?? l.rate ?? '',
-      loanDate: l.loanDate ?? l.date ?? l.startDate ?? '',
-      phoneNumber: l.phoneNumber ?? l.phone ?? l.contact ?? ''
-    };
-  }
-
-  function loansToCSV(loans) {
-    if (!loans || loans.length === 0) return '';
-    const columns = ['BorrowerName','LoanAmount','InterestRate','LoanDate','PhoneNumber'];
-    const rows = loans.map(ln => {
-      const n = normalizeLoan(ln);
-      return columns.map(col => {
-        const key = col === 'BorrowerName' ? 'borrowerName' :
-                    col === 'LoanAmount' ? 'amount' :
-                    col === 'InterestRate' ? 'interestRate' :
-                    col === 'LoanDate' ? 'loanDate' :
-                    'phoneNumber';
-        const val = (n[key] ?? '').toString().replace(/"/g,'""');
-        return `"${val}"`;
-      }).join(',');
-    });
-    return [columns.join(','), ...rows].join('\n');
+  // UI helpers
+  function showMsg(text, t = 3000) {
+    const el = document.getElementById('backup-msg');
+    if (!el) return;
+    el.textContent = text;
+    el.style.display = 'block';
+    clearTimeout(el._t);
+    el._t = setTimeout(()=> { el.style.display = 'none'; el.textContent = ''; }, t);
   }
 
   function download(content, filename, mime) {
@@ -205,169 +267,6 @@
     setTimeout(()=> URL.revokeObjectURL(url), 1500);
   }
 
-  function showMsg(text, t = 3000) {
-    const el = document.getElementById('backup-msg');
-    if (!el) return;
-    el.textContent = text;
-    el.style.display = 'block';
-    clearTimeout(el._t);
-    el._t = setTimeout(()=> { el.style.display = 'none'; el.textContent = ''; }, t);
-  }
-
-  // GitHub upload helpers
-  function getStoredPAT() {
-    try { return localStorage.getItem('GITHUB_BACKUP_PAT') || '';} catch(e){return '';}
-  }
-  function setStoredPAT(v) { try { localStorage.setItem('GITHUB_BACKUP_PAT', v); } catch(e){} }
-  function clearStoredPAT(){ try { localStorage.removeItem('GITHUB_BACKUP_PAT'); } catch(e){} }
-
-  async function uploadBackupToGitHub(jsonObj) {
-    const pat = getStoredPAT();
-    if (!pat) { showMsg('No PAT (Backup Settings) — backup skipped'); return false; }
-    const timestamp = (new Date()).toISOString().replace(/[:.]/g,'-');
-    const filename = `${BACKUP_DIR}/${timestamp}-backup.json`;
-    const path = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(filename)}`;
-    const contentStr = JSON.stringify(jsonObj, null, 2);
-    const contentB64 = btoa(unescape(encodeURIComponent(contentStr)));
-
-    // Check if file exists to get sha
-    let existingSha = null;
-    try {
-      const getResp = await fetch(path + `?ref=${TARGET_BRANCH}`, { headers: { 'Authorization': 'token ' + pat, 'Accept':'application/vnd.github.v3+json' } });
-      if (getResp.status === 200) {
-        const data = await getResp.json();
-        existingSha = data.sha;
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    const body = {
-      message: `backup: ${timestamp}`,
-      content: contentB64,
-      branch: TARGET_BRANCH
-    };
-    if (existingSha) body.sha = existingSha;
-
-    try {
-      const resp = await fetch(path, {
-        method: 'PUT',
-        headers: {
-          'Authorization': 'token ' + pat,
-          'Accept': 'application/vnd.github.v3+json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
-      if (!resp.ok) {
-        const txt = await resp.text();
-        console.error('Upload failed', resp.status, txt);
-        showMsg('Repo upload failed');
-        return false;
-      }
-      showMsg('Backup saved to repo');
-      return true;
-    } catch (err) {
-      console.error(err);
-      showMsg('Upload error');
-      return false;
-    }
-  }
-
-  // UI: config modal
-  const modal = document.getElementById('backup-modal');
-  const btnConfig = document.getElementById('backup-config');
-  const patInput = document.getElementById('pat-input');
-  document.getElementById('pat-save')?.addEventListener('click', () => {
-    const v = patInput.value.trim();
-    if (!v) { alert('Enter token'); return; }
-    setStoredPAT(v);
-    modal.classList.remove('active');
-    showMsg('Token saved (in browser)');
-    patInput.value = '';
-  });
-  document.getElementById('pat-clear')?.addEventListener('click', () => {
-    clearStoredPAT(); patInput.value = ''; modal.classList.remove('active'); showMsg('Token cleared');
-  });
-  btnConfig?.addEventListener('click', () => { modal.classList.add('active'); });
-  modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.remove('active'); });
-
-  // Export handlers
-  document.getElementById('export-json')?.addEventListener('click', async () => {
-    const { loans } = readLoans();
-    if (!loans || loans.length === 0) { alert('No loans to export'); return; }
-    const normalized = loans.map(normalizeLoan);
-    download(JSON.stringify(normalized, null, 2), 'loans-backup.json', 'application/json');
-    showMsg('JSON exported locally');
-    // try repo upload in background
-    uploadBackupToGitHub({ createdAt: new Date().toISOString(), loans: normalized });
-  });
-
-  document.getElementById('export-csv')?.addEventListener('click', async () => {
-    const { loans } = readLoans();
-    const csv = loansToCSV(loans);
-    if (!csv) { alert('No loans to export'); return; }
-    download(csv, 'loans.csv', 'text/csv;charset=utf-8;');
-    showMsg('CSV exported locally');
-    const normalized = loans.map(normalizeLoan);
-    uploadBackupToGitHub({ createdAt: new Date().toISOString(), loans: normalized });
-  });
-
-  document.getElementById('export-pdf')?.addEventListener('click', async () => {
-    const { loans } = readLoans();
-    if (!loans || loans.length === 0) { alert('No loans to export'); return; }
-
-    const tableStyles = `
-      <style>
-        body{font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; padding:16px;}
-        table{width:100%; border-collapse:collapse; margin-top:8px;}
-        th,td{border:1px solid #ddd; padding:8px; text-align:left; font-size:12px;}
-        th{background:#f0f0f0; font-weight:700;}
-        caption{font-size:18px; font-weight:700; margin-bottom:8px; text-align:left;}
-      </style>
-    `;
-
-    const header = ['Borrower Name','Loan Amount','Interest Rate','Loan Date','Phone'];
-    const rows = loans.map(ln => {
-      const n = normalizeLoan(ln);
-      return `<tr>
-        <td>${escapeHtml(n.borrowerName)}</td>
-        <td>${escapeHtml(n.amount)}</td>
-        <td>${escapeHtml(n.interestRate)}</td>
-        <td>${escapeHtml(n.loanDate)}</td>
-        <td>${escapeHtml(n.phoneNumber)}</td>
-      </tr>`;
-    }).join('');
-
-    const html = `<div id="loans-export"><caption>All Loans</caption><table>
-      <thead><tr>${header.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>`;
-
-    const container = document.createElement('div');
-    container.innerHTML = tableStyles + html;
-    document.body.appendChild(container);
-
-    try {
-      const opt = {
-        margin: 10,
-        filename: 'loans.pdf',
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-      };
-      await html2pdf().set(opt).from(container).save();
-      showMsg('PDF exported locally');
-      const normalized = loans.map(normalizeLoan);
-      uploadBackupToGitHub({ createdAt: new Date().toISOString(), loans: normalized });
-    } catch (err) {
-      console.error(err);
-      alert('PDF export failed: ' + (err && err.message ? err.message : err));
-    } finally {
-      container.remove();
-    }
-  });
-
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';
     return String(str)
@@ -378,22 +277,117 @@
       .replace(/'/g, '&#039;');
   }
 
-  // Import JSON
+  // Export implementations reading from IndexedDB
+  async function exportJSON(db) {
+    const loans = await getAllLoans(db);
+    if (!loans || loans.length === 0) { alert('No loans to export'); return; }
+    download(JSON.stringify(loans, null, 2), 'loans-backup.json', 'application/json');
+    showMsg('JSON exported');
+  }
+
+  async function exportCSV(db) {
+    const loans = await getAllLoans(db);
+    if (!loans || loans.length === 0) { alert('No loans to export'); return; }
+    const columns = ['BorrowerName','LoanAmount','InterestRate','LoanDate','PhoneNumber'];
+    const rows = loans.map(ln => {
+      return columns.map(col => {
+        const key = col === 'BorrowerName' ? 'borrowerName' :
+                    col === 'LoanAmount' ? 'amount' :
+                    col === 'LoanDate' ? 'loanDate' :
+                    col === 'InterestRate' ? 'interestRate' :
+                    'phoneNumber';
+        const val = (ln[key] ?? '').toString().replace(/"/g,'""');
+        return `"${val}"`;
+      }).join(',');
+    });
+    const csv = [columns.join(','), ...rows].join('\n');
+    download(csv, 'loans.csv', 'text/csv;charset=utf-8;');
+    showMsg('CSV exported');
+  }
+
+  async function exportPDF(db) {
+    const loans = await getAllLoans(db);
+    if (!loans || loans.length === 0) { alert('No loans to export'); return; }
+    const tableStyles = `
+      <style>
+        body{font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; padding:16px;}
+        table{width:100%; border-collapse:collapse; margin-top:8px;}
+        th,td{border:1px solid #ddd; padding:8px; text-align:left; font-size:12px;}
+        th{background:#f0f0f0; font-weight:700;}
+        caption{font-size:18px; font-weight:700; margin-bottom:8px; text-align:left;}
+      </style>
+    `;
+    const header = ['Borrower Name','Loan Amount','Interest Rate','Loan Date','Phone'];
+    const rows = loans.map(ln => {
+      return `<tr>
+        <td>${escapeHtml(ln.borrowerName)}</td>
+        <td>${escapeHtml(ln.amount)}</td>
+        <td>${escapeHtml(ln.interestRate)}</td>
+        <td>${escapeHtml(ln.loanDate)}</td>
+        <td>${escapeHtml(ln.phoneNumber)}</td>
+      </tr>`;
+    }).join('');
+    const html = `<div id="loans-export"><caption>All Loans</caption><table>
+      <thead><tr>${header.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+    const container = document.createElement('div');
+    container.innerHTML = tableStyles + html;
+    document.body.appendChild(container);
+    try {
+      const opt = {
+        margin: 10,
+        filename: 'loans.pdf',
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      };
+      await html2pdf().set(opt).from(container).save();
+      showMsg('PDF exported');
+    } catch (err) {
+      console.error(err);
+      alert('PDF export failed: ' + (err && err.message ? err.message : err));
+    } finally {
+      container.remove();
+    }
+  }
+
+  // Import JSON into IndexedDB
   const importFileInput = document.getElementById('import-file');
-  document.getElementById('import-json')?.addEventListener('click', () => importFileInput?.click());
-  importFileInput?.addEventListener('change', (ev) => {
+  importFileInput?.addEventListener('change', async (ev) => {
     const file = ev.target.files && ev.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const parsed = JSON.parse(e.target.result);
         if (!Array.isArray(parsed)) throw new Error('Backup must be a JSON array');
-        const { key: detectedKey } = readLoans();
-        if (!saveLoans(detectedKey || PREFERRED_KEY, parsed)) throw new Error('Save failed');
+        const db = await openDB();
+        // clear existing and insert
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        // remove all existing
+        if (store.clear) store.clear();
+        for (let i = 0; i < parsed.length; i++) {
+          const raw = parsed[i];
+          const norm = normalizeLoan(raw);
+          const loan = {
+            id: makeId(),
+            borrowerName: norm.borrowerName,
+            amount: norm.amount,
+            interestRate: norm.interestRate,
+            loanDate: norm.loanDate,
+            phoneNumber: norm.phoneNumber,
+            status: raw.status ?? 'active',
+            createdAt: raw.createdAt ?? new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          store.put(loan);
+        }
+        await tx.done;
         showMsg('Backup imported & saved');
         if (typeof renderLoans === 'function') renderLoans();
-      } catch(err) {
+      } catch (err) {
         alert('Import failed: ' + (err.message || err));
       } finally {
         ev.target.value = '';
@@ -402,10 +396,45 @@
     reader.readAsText(file);
   });
 
-  window.updateLoansAndSave = function(newLoans) {
-    const { key } = readLoans();
-    saveLoans(key || PREFERRED_KEY, newLoans);
-    showMsg('Saved');
+  // Wire buttons after DB open and migration
+  const db = await openDB();
+  await migrateToIndexedDB(db);
+
+  document.getElementById('export-json')?.addEventListener('click', () => exportJSON(db));
+  document.getElementById('export-csv')?.addEventListener('click', () => exportCSV(db));
+  document.getElementById('export-pdf')?.addEventListener('click', () => exportPDF(db));
+  document.getElementById('import-json')?.addEventListener('click', () => importFileInput?.click());
+
+  // Expose helper for app to save loans back to DB
+  window.updateLoansAndSave = async function(newLoans) {
+    try {
+      const db = await openDB();
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      // naive approach: clear and bulk put
+      if (store.clear) store.clear();
+      for (let i = 0; i < newLoans.length; i++) {
+        const raw = newLoans[i];
+        const norm = normalizeLoan(raw);
+        const loan = {
+          id: raw.id ?? makeId(),
+          borrowerName: norm.borrowerName,
+          amount: norm.amount,
+          interestRate: norm.interestRate,
+          loanDate: norm.loanDate,
+          phoneNumber: norm.phoneNumber,
+          status: raw.status ?? 'active',
+          createdAt: raw.createdAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        store.put(loan);
+      }
+      await tx.done;
+      showMsg('Saved');
+    } catch (e) {
+      console.error('updateLoansAndSave failed', e);
+      showMsg('Save failed');
+    }
   };
 
 })();
