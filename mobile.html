@@ -71,7 +71,7 @@
   #backup-msg {
     position: fixed;
     right: 12px;
-    bottom: 84px;
+    bottom: 120px;
     background: rgba(0,0,0,0.7);
     color: #fff;
     padding: 8px 12px;
@@ -80,6 +80,16 @@
     display: none;
     z-index: 10000;
   }
+  /* simple modal */
+  #backup-modal {
+    position: fixed;
+    left: 0; top: 0; right:0; bottom:0;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.5); z-index: 11000;
+  }
+  #backup-modal.active { display:flex; }
+  #backup-modal .modal-box { background:white; padding:16px; border-radius:8px; width:90%; max-width:480px; }
+  #pat-input { width:100%; padding:8px; border:1px solid #ddd; border-radius:6px; }
 </style>
 
 <div id="backup-floating" aria-hidden="true">
@@ -87,12 +97,30 @@
   <button id="export-csv">Export CSV</button>
   <button id="export-json">Export JSON</button>
   <button id="import-json">Import JSON</button>
+  <button id="backup-config">Backup Settings</button>
   <input id="import-file" type="file" accept="application/json" style="display:none" />
 </div>
 <div id="backup-msg" role="status"></div>
 
+<div id="backup-modal" aria-hidden="true">
+  <div class="modal-box">
+    <h3>Backup Settings</h3>
+    <p style="font-size:0.9em;color:#444;margin-bottom:8px;">Paste a short-lived GitHub Personal Access Token (repo scope) to enable automatic repo backups. The token will be stored only in your browser's localStorage. Revoke it when finished.</p>
+    <input id="pat-input" placeholder="ghp_your_token_here" autocomplete="off" />
+    <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end;">
+      <button id="pat-save" style="background:#28a745;color:#fff;padding:8px 12px;border-radius:6px;border:none;">Save</button>
+      <button id="pat-clear" style="background:#dc3545;color:#fff;padding:8px 12px;border-radius:6px;border:none;">Clear</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function(){
+  const OWNER = 'rakshithanaveen';
+  const REPO = 'My-loan';
+  const TARGET_BRANCH = 'main';
+  const BACKUP_DIR = 'backups';
+
   const PREFERRED_KEY = 'loans';
   const KNOWN_KEYS = ['loans','myLoans','loanData','loan_list','loanDataList','loanDetails'];
 
@@ -186,42 +214,103 @@
     el._t = setTimeout(()=> { el.style.display = 'none'; el.textContent = ''; }, t);
   }
 
-  document.getElementById('export-json')?.addEventListener('click', () => {
+  // GitHub upload helpers
+  function getStoredPAT() {
+    try { return localStorage.getItem('GITHUB_BACKUP_PAT') || '';} catch(e){return '';}
+  }
+  function setStoredPAT(v) { try { localStorage.setItem('GITHUB_BACKUP_PAT', v); } catch(e){} }
+  function clearStoredPAT(){ try { localStorage.removeItem('GITHUB_BACKUP_PAT'); } catch(e){} }
+
+  async function uploadBackupToGitHub(jsonObj) {
+    const pat = getStoredPAT();
+    if (!pat) { showMsg('No PAT (Backup Settings) — backup skipped'); return false; }
+    const timestamp = (new Date()).toISOString().replace(/[:.]/g,'-');
+    const filename = `${BACKUP_DIR}/${timestamp}-backup.json`;
+    const path = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(filename)}`;
+    const contentStr = JSON.stringify(jsonObj, null, 2);
+    const contentB64 = btoa(unescape(encodeURIComponent(contentStr)));
+
+    // Check if file exists to get sha
+    let existingSha = null;
+    try {
+      const getResp = await fetch(path + `?ref=${TARGET_BRANCH}`, { headers: { 'Authorization': 'token ' + pat, 'Accept':'application/vnd.github.v3+json' } });
+      if (getResp.status === 200) {
+        const data = await getResp.json();
+        existingSha = data.sha;
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    const body = {
+      message: `backup: ${timestamp}`,
+      content: contentB64,
+      branch: TARGET_BRANCH
+    };
+    if (existingSha) body.sha = existingSha;
+
+    try {
+      const resp = await fetch(path, {
+        method: 'PUT',
+        headers: {
+          'Authorization': 'token ' + pat,
+          'Accept': 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        console.error('Upload failed', resp.status, txt);
+        showMsg('Repo upload failed');
+        return false;
+      }
+      showMsg('Backup saved to repo');
+      return true;
+    } catch (err) {
+      console.error(err);
+      showMsg('Upload error');
+      return false;
+    }
+  }
+
+  // UI: config modal
+  const modal = document.getElementById('backup-modal');
+  const btnConfig = document.getElementById('backup-config');
+  const patInput = document.getElementById('pat-input');
+  document.getElementById('pat-save')?.addEventListener('click', () => {
+    const v = patInput.value.trim();
+    if (!v) { alert('Enter token'); return; }
+    setStoredPAT(v);
+    modal.classList.remove('active');
+    showMsg('Token saved (in browser)');
+    patInput.value = '';
+  });
+  document.getElementById('pat-clear')?.addEventListener('click', () => {
+    clearStoredPAT(); patInput.value = ''; modal.classList.remove('active'); showMsg('Token cleared');
+  });
+  btnConfig?.addEventListener('click', () => { modal.classList.add('active'); });
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.remove('active'); });
+
+  // Export handlers
+  document.getElementById('export-json')?.addEventListener('click', async () => {
     const { loans } = readLoans();
     if (!loans || loans.length === 0) { alert('No loans to export'); return; }
-    download(JSON.stringify(loans, null, 2), 'loans-backup.json', 'application/json');
-    showMsg('JSON exported');
+    const normalized = loans.map(normalizeLoan);
+    download(JSON.stringify(normalized, null, 2), 'loans-backup.json', 'application/json');
+    showMsg('JSON exported locally');
+    // try repo upload in background
+    uploadBackupToGitHub({ createdAt: new Date().toISOString(), loans: normalized });
   });
 
-  document.getElementById('export-csv')?.addEventListener('click', () => {
+  document.getElementById('export-csv')?.addEventListener('click', async () => {
     const { loans } = readLoans();
     const csv = loansToCSV(loans);
     if (!csv) { alert('No loans to export'); return; }
     download(csv, 'loans.csv', 'text/csv;charset=utf-8;');
-    showMsg('CSV exported');
-  });
-
-  const importFileInput = document.getElementById('import-file');
-  document.getElementById('import-json')?.addEventListener('click', () => importFileInput?.click());
-  importFileInput?.addEventListener('change', (ev) => {
-    const file = ev.target.files && ev.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const parsed = JSON.parse(e.target.result);
-        if (!Array.isArray(parsed)) throw new Error('Backup must be a JSON array');
-        const { key: detectedKey } = readLoans();
-        if (!saveLoans(detectedKey || PREFERRED_KEY, parsed)) throw new Error('Save failed');
-        showMsg('Backup imported & saved');
-        if (typeof renderLoans === 'function') renderLoans();
-      } catch(err) {
-        alert('Import failed: ' + (err.message || err));
-      } finally {
-        ev.target.value = '';
-      }
-    };
-    reader.readAsText(file);
+    showMsg('CSV exported locally');
+    const normalized = loans.map(normalizeLoan);
+    uploadBackupToGitHub({ createdAt: new Date().toISOString(), loans: normalized });
   });
 
   document.getElementById('export-pdf')?.addEventListener('click', async () => {
@@ -268,7 +357,9 @@
         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
       };
       await html2pdf().set(opt).from(container).save();
-      showMsg('PDF exported');
+      showMsg('PDF exported locally');
+      const normalized = loans.map(normalizeLoan);
+      uploadBackupToGitHub({ createdAt: new Date().toISOString(), loans: normalized });
     } catch (err) {
       console.error(err);
       alert('PDF export failed: ' + (err && err.message ? err.message : err));
@@ -286,6 +377,30 @@
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
   }
+
+  // Import JSON
+  const importFileInput = document.getElementById('import-file');
+  document.getElementById('import-json')?.addEventListener('click', () => importFileInput?.click());
+  importFileInput?.addEventListener('change', (ev) => {
+    const file = ev.target.files && ev.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        if (!Array.isArray(parsed)) throw new Error('Backup must be a JSON array');
+        const { key: detectedKey } = readLoans();
+        if (!saveLoans(detectedKey || PREFERRED_KEY, parsed)) throw new Error('Save failed');
+        showMsg('Backup imported & saved');
+        if (typeof renderLoans === 'function') renderLoans();
+      } catch(err) {
+        alert('Import failed: ' + (err.message || err));
+      } finally {
+        ev.target.value = '';
+      }
+    };
+    reader.readAsText(file);
+  });
 
   window.updateLoansAndSave = function(newLoans) {
     const { key } = readLoans();
