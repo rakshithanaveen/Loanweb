@@ -17,21 +17,21 @@ jobs:
       - name: Set up Node.js Runtime
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
-      - name: Create package.json stub if missing
+      - name: Setup App Workspace Directories
         run: |
-          if [ ! -f package.json ]; then
-            echo '{"name": "loan-manager-app", "version": "1.0.0", "dependencies": {}}' > package.json
-          fi
+          mkdir -p www
+          cp index.html www/
+          echo '{"name": "loan-manager-app", "version": "1.0.0", "dependencies": {}}' > package.json
 
       - name: Install Open Source Mobile Tooling
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npm install @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest
 
       - name: Initialize App Framework Layout
         run: |
-          npx cap init "Loan Manager" "com.naveen.loanmanager" --web-dir=. --confirm
+          npx cap init "Loan Manager" "com.naveen.loanmanager" --web-dir=www --confirm
           npx cap add android
 
       - name: Sync App Views to Native Container
