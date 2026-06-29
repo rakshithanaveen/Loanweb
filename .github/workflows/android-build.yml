@@ -21,9 +21,9 @@ jobs:
 
       - name: Setup App Workspace Directories
         run: |
+          npm init -y
           mkdir -p www
           cp index.html www/
-          echo '{"name": "loan-manager-app", "version": "1.0.0", "dependencies": {}}' > package.json
 
       - name: Install Open Source Mobile Tooling
         run: |
@@ -32,7 +32,9 @@ jobs:
       - name: Initialize App Framework Layout
         run: |
           npx cap init "Loan Manager" "com.naveen.loanmanager" --web-dir=www --confirm
-          npx cap add android
+
+      - name: Add Android Platform Shell
+        run: npx cap add android
 
       - name: Sync App Views to Native Container
         run: npx cap sync android
